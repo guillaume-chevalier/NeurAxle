@@ -20,7 +20,7 @@ This is the core of Neuraxle's pipelines. You can chain steps to call them one a
 
 """
 from abc import ABC, abstractmethod
-from typing import Any, Tuple
+from typing import Any, Tuple, List
 
 from neuraxle.base import BaseStep, TruncableSteps, NamedTupleList, ResumableStepMixin
 from neuraxle.checkpoints import BaseCheckpointStep
@@ -105,15 +105,77 @@ class Pipeline(BasePipeline, BaseStep, ResumableStepMixin):
         """
         steps_left_to_do, data_inputs = self.read_checkpoint(data_inputs)
 
+        # TODO: perhaps do this? to push the ifs into a factory and have no ifs in the loop below.
+        # decorated_steps_left_to_do: List[PipelineStepHandler] = PipelineStepHandlerFactory.decorate(steps_left_to_do)
+
+        #dos = DataObjectContainer([DataObject(di) for di in data_inputs])
+        dos = DataObjectContainer(data_inputs, HasherByIndex())
+
+        last_checkpoint_step = 0
         new_steps_as_tuple: NamedTupleList = []
         for step_name, step in steps_left_to_do:
-            step, data_inputs = step.fit_transform(data_inputs, expected_outputs)
+
+            # TODO: do just this instead:
+            step, data_inputs, expected_outputs, dos = step.handle(data_inputs, expected_outputs, dos, self)
+            # end of todo.
+
+            # TODO Other idea:
+            if is_currently_packed:
+                step, dos = step.handle_packed(
+                    dos=dos, truncable=self)
+            else:
+                step, data_inputs, expected_outputs = step.handle_unpacked(
+                    data_inputs=data_inputs, expected_outputs=expected_outputs)
+            if transition_to_unpacked:
+                data_inputs, expected_outputs = dos.unpack()
+            elif transition_to_packed:
+                dos.pack(data_inputs, expected_outputs)
+            # end of todo other idea.
+
+            # TODO: other idea:
+            if isinstance(step, Hasher):
+                dos.set_new_hasher(step)
+            elif isinstance(step, BaseCheckpointStep):
+                to_hash: List[BaseStep] = self[last_checkpoint_step:step_name]
+                dos.repack(these_data_inputs, to_hash)
+                step, dos = step.fit_transform(dos, expected_outputs)
+                these_data_inputs = dos.unpack()
+                last_checkpoint_step = step
+            else:
+                step, these_data_inputs = step.fit_transform(these_data_inputs, expected_outputs)
+            # End of todo other idea.
+
             new_steps_as_tuple.append((step_name, step))
 
         self.steps_as_tuple = self.steps_as_tuple[:len(self.steps_as_tuple) - len(steps_left_to_do)] + \
                               new_steps_as_tuple
 
-        return self, data_inputs
+        return self, dos.unpack()
+
+    def tmptest(self):
+
+        # TODO: this is a unit test to finish. Move to test file.
+
+        p = Pipeline([
+            # Pack
+            HasherByIndex(),
+            # Unpack
+            SomeStep(),
+            SomeStep(),
+            SomeStep(),
+            SomeStep(),
+            SomeStep(),
+            # Pack
+            HasherByDataHash(),
+            Unpack(),
+            SomeStep(),
+            # Pack
+            HasherByIndex(),
+            Checkpoint(),
+            # Unpack
+            SomeStep(),
+        ])
+
 
     def transform(self, data_inputs):
         """
@@ -155,6 +217,7 @@ class Pipeline(BasePipeline, BaseStep, ResumableStepMixin):
         :return: index, (data_inputs, expected_outputs) tuple for the starting step data inputs-outputs
          and the starting step index
         """
+        # TODO: return list of steps directly with __getitem__()
         for index, (step_name, step) in enumerate(reversed(self.steps_as_tuple)):
             if isinstance(step, ResumableStepMixin) and step.should_resume(data_inputs):
                 return len(self.steps_as_tuple) - index - 1
